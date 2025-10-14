@@ -4457,34 +4457,124 @@ function Library:LoadConfig(savefile)
 	self.autoSaveEnabled = wasAutoSaveEnabled
 end
 
--- Attach optional modules if present (Utils, KeySystem, Notifications, HelpBubbles)
-pcall(function()
-    if script and script.Parent then
-        local function requireIfExists(name)
-            local child = script.Parent:FindFirstChild(name)
-            if child then
-                local ok, mod = pcall(require, child)
-                if ok then return mod end
+-- Auto-load and initialize modules from filesystem "Modules" folders (executor file system)
+do
+    local function _tryAttachFS(modName, mod)
+        if typeof(mod) == "function" then
+            local ok, exported = pcall(mod, Library)
+            if ok then
+                if exported ~= nil then
+                    Library.Modules = Library.Modules or {}
+                    Library.Modules[modName] = exported
+                    if typeof(exported) == "table" and Library[modName] == nil then
+                        Library[modName] = exported
+                    end
+                end
+                return true
             end
-            return nil
-        end
-
-        local utils = requireIfExists("Utils")
-        if utils then
-            Library.Utils = utils
-        end
-
-        local attach = function(name)
-            local mod = requireIfExists(name)
-            if typeof(mod) == "function" then
-                pcall(mod, Library)
+        elseif typeof(mod) == "table" then
+            local f = rawget(mod, "Init") or rawget(mod, "init") or rawget(mod, "Attach") or rawget(mod, "attach")
+            if typeof(f) == "function" then
+                pcall(f, mod, Library)
+                return true
             end
+            Library.Modules = Library.Modules or {}
+            Library.Modules[modName] = mod
+            if Library[modName] == nil then
+                Library[modName] = mod
+            end
+            return true
         end
-
-        attach("KeySystem")
-        attach("Notifications")
-        attach("HelpBubbles")
+        return false
     end
+
+    local function _loadFileModule(path)
+        if typeof(readfile) ~= "function" then return end
+        local okRead, src = pcall(function() return readfile(path) end)
+        if not okRead or not src or src == "" then return end
+        local loader = (typeof(loadstring) == "function" and loadstring) or (typeof(load) == "function" and load) or nil
+        if not loader then return end
+        local okChunk, chunk = pcall(function() return loader(src, "=" .. tostring(path)) end)
+        if not okChunk or typeof(chunk) ~= "function" then return end
+        local okCall, mod = pcall(chunk)
+        if not okCall then return end
+        local name = tostring(path):match("([^/\\]+)%.lua$") or tostring(path)
+        _tryAttachFS(name, mod)
+    end
+
+    local function _loadFromDir(dir)
+        if typeof(listfiles) ~= "function" or typeof(isfolder) ~= "function" or not isfolder(dir) then return end
+        local ok, files = pcall(listfiles, dir)
+        if not ok or typeof(files) ~= "table" then return end
+        table.sort(files, function(a, b) return tostring(a) < tostring(b) end)
+        for _, p in ipairs(files) do
+            if typeof(p) == "string" and p:lower():sub(-4) == ".lua" then
+                _loadFileModule(p)
+            end
+        end
+    end
+
+    pcall(function()
+        -- Primary Modules folder (project root)
+        _loadFromDir("Modules")
+    end)
+end
+
+-- Auto-load and initialize modules from any nearby "Modules" folder and sibling ModuleScripts
+pcall(function()
+    if not (script and script.Parent) then return end
+
+    local function tryAttach(mod, childName)
+        if typeof(mod) == "function" then
+            pcall(mod, Library)
+            return true
+        elseif typeof(mod) == "table" then
+            -- Common conventions
+            local f = rawget(mod, "Init") or rawget(mod, "init") or rawget(mod, "Attach") or rawget(mod, "attach")
+            if typeof(f) == "function" then
+                pcall(f, mod, Library)
+                return true
+            end
+            if childName == "Utils" then
+                Library.Utils = mod
+                return true
+            end
+        end
+        return false
+    end
+
+    local function tryRequire(child)
+        local ok, res = pcall(require, child)
+        if ok then
+            tryAttach(res, child.Name)
+        end
+    end
+
+    local function loadFrom(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if child ~= script and child:IsA("ModuleScript") then
+                tryRequire(child)
+            end
+        end
+    end
+
+    local parent = script.Parent
+
+    -- Scan any ancestor for a child named "Modules" and load from it
+    local current = parent
+    local seen = {}
+    while current do
+        local mf = current:FindFirstChild("Modules")
+        if mf and not seen[mf] then
+            seen[mf] = true
+            loadFrom(mf)
+        end
+        current = current.Parent
+    end
+
+    -- Backward compatibility: also scan siblings next to SourceUI.lua
+    loadFrom(parent)
 end)
 
 return Library
